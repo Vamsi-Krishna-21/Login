@@ -12,11 +12,11 @@ async function startBackendServer() {
   // Connect to database
   await connectAndSeed();
 
-  // Non-blocking check of email transporter on startup
+  // Check that required Resend configuration is present without making a network request.
   verifyEmailTransporter().catch(() => {
     console.error(JSON.stringify({
-      event: "email.smtp.startup_check.failure",
-      message: "Unexpected error while verifying SMTP configuration.",
+      event: "email.resend.startup_check.failure",
+      message: "Unexpected error while checking Resend configuration.",
     }));
   });
 

@@ -1,270 +1,160 @@
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { getEmailConfig } from "../config/env.js";
 
-let cachedTransporter: nodemailer.Transporter | null = null;
-let cachedTransporterConfig: {
-  user: string;
-  pass: string;
-  host: string;
-  port: number;
-  secure: boolean;
-} | null = null;
+let cachedResend: Resend | null = null;
+let cachedApiKey: string | null = null;
 
-type SmtpFailureCategory =
-  | "authentication_failure"
-  | "connection_failure"
-  | "tls_failure"
-  | "server_rejection"
-  | "other";
+type EmailOperation = "email-change" | "password-change" | "password-reset";
 
-function getSmtpErrorDetails(error: unknown): {
-  category: SmtpFailureCategory;
-  code?: string;
-  responseCode?: number;
-  command?: string;
-  message: string;
+function getResendErrorDetails(error: unknown): {
+  statusCode?: number;
+  category: string;
+  requestId?: string;
 } {
-  const smtpError = error && typeof error === "object"
+  const resendError = error && typeof error === "object"
     ? error as {
-        code?: unknown;
-        responseCode?: unknown;
-        command?: unknown;
-        message?: unknown;
+        statusCode?: unknown;
+        name?: unknown;
+        headers?: unknown;
       }
     : {};
-  const code = typeof smtpError.code === "string" && /^[A-Z0-9_-]{1,40}$/i.test(smtpError.code)
-    ? smtpError.code
+  const statusCode = typeof resendError.statusCode === "number" &&
+    Number.isInteger(resendError.statusCode)
+    ? resendError.statusCode
     : undefined;
-  const responseCode = typeof smtpError.responseCode === "number" &&
-    Number.isInteger(smtpError.responseCode)
-    ? smtpError.responseCode
+  const errorName = typeof resendError.name === "string" &&
+    /^[a-z0-9_-]{1,60}$/i.test(resendError.name)
+    ? resendError.name
     : undefined;
-  const command = typeof smtpError.command === "string" &&
-    /^[A-Z ]{1,30}$/i.test(smtpError.command)
-    ? smtpError.command.toUpperCase()
+  const headers = resendError.headers && typeof resendError.headers === "object"
+    ? resendError.headers as Record<string, unknown>
+    : null;
+  const requestIdValue = headers?.["x-request-id"] ??
+    headers?.["request-id"] ??
+    headers?.["x-resend-id"];
+  const requestId = typeof requestIdValue === "string" &&
+    /^[a-z0-9._:-]{1,128}$/i.test(requestIdValue)
+    ? requestIdValue
     : undefined;
-  const errorMessage = typeof smtpError.message === "string" ? smtpError.message : "";
-
-  if (responseCode === 535 || responseCode === 534 || code === "EAUTH") {
-    return {
-      category: "authentication_failure",
-      code,
-      responseCode,
-      command,
-      message: "SMTP authentication was rejected.",
-    };
-  }
-  if (
-    /tls|ssl|certificate|handshake|self[- ]signed/i.test(errorMessage) ||
-    code === "ERR_TLS_CERT_ALTNAME_INVALID" ||
-    code === "ETLS"
-  ) {
-    return {
-      category: "tls_failure",
-      code,
-      responseCode,
-      command,
-      message: "SMTP TLS negotiation or certificate validation failed.",
-    };
-  }
-  if (
-    ["ECONNECTION", "ECONNREFUSED", "ETIMEDOUT", "ESOCKET", "EHOSTUNREACH", "ENETUNREACH"]
-      .includes(code || "")
-  ) {
-    return {
-      category: "connection_failure",
-      code,
-      responseCode,
-      command,
-      message: "Could not establish or maintain the SMTP connection.",
-    };
-  }
-  if (responseCode !== undefined && responseCode >= 400) {
-    return {
-      category: "server_rejection",
-      code,
-      responseCode,
-      command,
-      message: "The SMTP server rejected the message or command.",
-    };
-  }
+  const category = statusCode === 401 || statusCode === 403
+    ? "authentication_or_authorization_failure"
+    : statusCode === 429
+      ? "rate_limited"
+      : statusCode !== undefined && statusCode >= 500
+        ? "provider_server_error"
+        : statusCode !== undefined
+          ? "provider_rejected_request"
+          : errorName === "validation_error"
+            ? "provider_validation_failure"
+            : errorName
+              ? "network_or_sdk_error"
+              : "unknown_failure";
 
   return {
-    category: "other",
-    code,
-    responseCode,
-    command,
-    message: "The SMTP operation failed.",
+    ...(statusCode !== undefined ? { statusCode } : {}),
+    category,
+    ...(requestId ? { requestId } : {}),
   };
 }
 
-function logSmtpFailure(operation: "verify" | "send", port: number, error: unknown): void {
-  const details = getSmtpErrorDetails(error);
+function logResendFailure(operation: EmailOperation, error: unknown): void {
   console.error(JSON.stringify({
-    event: "email.smtp.failure",
+    event: "email.resend.failure",
     operation,
-    category: details.category,
-    port,
-    ...(details.code ? { code: details.code } : {}),
-    ...(details.responseCode ? { responseCode: details.responseCode } : {}),
-    ...(details.command ? { command: details.command } : {}),
-    message: details.message,
+    ...getResendErrorDetails(error),
   }));
 }
 
-function createTransporter(
-  config: ReturnType<typeof getEmailConfig>,
-  port = config.port
-): nodemailer.Transporter {
-  return nodemailer.createTransport({
-    host: config.host,
-    port,
-    secure: port === config.port ? config.secure : port === 465,
-    ...(port === 587 ? { requireTLS: true } : {}),
-    auth: {
-      user: config.user,
-      pass: config.pass,
-    },
-    tls: {
-      rejectUnauthorized: true,
-    },
-  });
-}
-
-function hasSameTransporterConfig(config: ReturnType<typeof getEmailConfig>): boolean {
-  return Boolean(
-    cachedTransporterConfig &&
-    cachedTransporterConfig.user === config.user &&
-    cachedTransporterConfig.pass === config.pass &&
-    cachedTransporterConfig.host === config.host &&
-    cachedTransporterConfig.port === config.port &&
-    cachedTransporterConfig.secure === config.secure
-  );
-}
-
 /**
- * Returns a reusable Nodemailer transporter instance.
+ * Returns a reusable Resend client.
  */
-export function getTransporter(): nodemailer.Transporter | null {
+export function getTransporter(): Resend | null {
   const config = getEmailConfig();
-  if (!config.isConfigured) {
-    cachedTransporter = null;
-    cachedTransporterConfig = null;
+  if (!config.apiKey) {
+    cachedResend = null;
+    cachedApiKey = null;
     return null;
   }
 
-  if (!cachedTransporter || !hasSameTransporterConfig(config)) {
-    try {
-      cachedTransporter = createTransporter(config);
-      cachedTransporterConfig = {
-        user: config.user,
-        pass: config.pass,
-        host: config.host,
-        port: config.port,
-        secure: config.secure,
-      };
-    } catch (error) {
-      logSmtpFailure("verify", config.port, error);
-      return null;
-    }
+  if (!cachedResend || cachedApiKey !== config.apiKey) {
+    cachedResend = new Resend(config.apiKey);
+    cachedApiKey = config.apiKey;
   }
 
-  return cachedTransporter;
+  return cachedResend;
 }
 
 /**
- * Verifies SMTP connection and authentication.
+ * Checks local Resend configuration; it does not make a network request.
  */
 export async function verifyEmailTransporter(): Promise<{ verified: boolean; message: string }> {
   const config = getEmailConfig();
 
   if (!config.isConfigured) {
-    const category = config.configurationIssue === "conflicting-credentials"
-      ? "conflicting_credentials"
-      : "missing_configuration";
-    console.error(JSON.stringify({ event: "email.smtp.configuration_failure", category }));
+    console.error(JSON.stringify({
+      event: "email.resend.configuration_failure",
+      category: config.configurationIssue,
+    }));
     return {
       verified: false,
-      message: "Email service credentials are missing, incomplete, or conflicting.",
+      message: "Resend requires RESEND_API_KEY and EMAIL_FROM to be configured.",
     };
   }
 
-  const primaryTransporter = getTransporter();
-  if (!primaryTransporter) {
-    return { verified: false, message: "SMTP transporter could not be created." };
-  }
-
-  try {
-    await primaryTransporter.verify();
-    console.log(JSON.stringify({
-      event: "email.smtp.verified",
-      port: config.port,
-    }));
-    return { verified: true, message: "SMTP configuration verified successfully." };
-  } catch (error) {
-    logSmtpFailure("verify", config.port, error);
-    if (config.port === 465 && getSmtpErrorDetails(error).category === "connection_failure") {
-      try {
-        const fallbackTransporter = createTransporter(config, 587);
-        await fallbackTransporter.verify();
-        console.log(JSON.stringify({ event: "email.smtp.verified", port: 587 }));
-        return {
-          verified: true,
-          message: "SMTP configuration verified using port 587.",
-        };
-      } catch (retryError) {
-        logSmtpFailure("verify", 587, retryError);
-      }
-    }
-
-    return { verified: false, message: "SMTP verification failed. See server diagnostics." };
-  }
+  getTransporter();
+  console.log(JSON.stringify({ event: "email.resend.configuration_ready" }));
+  return { verified: true, message: "Resend email configuration is present." };
 }
 
 /**
- * Delivers an email message with port 587 fallback for connection failures on port 465.
+ * Submits an email through Resend and reports success only when the API accepts it.
  */
-async function deliverEmail(mailOptions: nodemailer.SendMailOptions): Promise<boolean> {
+async function deliverEmail(
+  operation: EmailOperation,
+  mailOptions: { to: string; subject: string; html: string }
+): Promise<boolean> {
   const config = getEmailConfig();
-  const primaryTransporter = getTransporter();
-
   if (!config.isConfigured) {
     console.error(JSON.stringify({
-      event: "email.smtp.configuration_failure",
-      category: config.configurationIssue === "conflicting-credentials"
-        ? "conflicting_credentials"
-        : "missing_configuration",
+      event: "email.resend.configuration_failure",
+      operation,
+      category: config.configurationIssue,
     }));
     return false;
   }
-  if (!primaryTransporter) {
+
+  const resend = getTransporter();
+  if (!resend) {
     return false;
   }
 
   try {
-    await primaryTransporter.sendMail(mailOptions);
+    const { data, error, headers } = await resend.emails.send({
+      from: config.from,
+      ...mailOptions,
+    });
+    if (error || !data) {
+      logResendFailure(operation, {
+        ...(error || {}),
+        headers,
+      });
+      return false;
+    }
+
+    const requestId = headers?.["x-request-id"] ??
+      headers?.["request-id"] ??
+      headers?.["x-resend-id"];
     console.log(JSON.stringify({
-      event: "email.smtp.submission_accepted",
-      port: config.port,
+      event: "email.resend.accepted",
+      operation,
+      ...(typeof requestId === "string" &&
+        /^[a-z0-9._:-]{1,128}$/i.test(requestId)
+        ? { requestId }
+        : {}),
     }));
     return true;
   } catch (error) {
-    logSmtpFailure("send", config.port, error);
-
-    if (config.port === 465 && getSmtpErrorDetails(error).category === "connection_failure") {
-      try {
-        const fallbackTransporter = createTransporter(config, 587);
-        await fallbackTransporter.sendMail(mailOptions);
-        console.log(JSON.stringify({
-          event: "email.smtp.submission_accepted",
-          port: 587,
-        }));
-        return true;
-      } catch (retryError) {
-        logSmtpFailure("send", 587, retryError);
-      }
-    }
-
+    logResendFailure(operation, error);
     return false;
   }
 }
@@ -507,8 +397,6 @@ export async function sendOtpEmail(
   otp: string,
   type: "email-change" | "password-change"
 ): Promise<boolean> {
-  const config = getEmailConfig();
-
   const subject =
     type === "email-change"
       ? "📧 Verify Your New Email Address - Workspace Dashboard Hub"
@@ -521,22 +409,11 @@ export async function sendOtpEmail(
 
   const htmlContent = generateOtpHtml(subject, description, otp);
 
-  const fromAddress = config.from.includes("<")
-    ? config.from
-    : `"Workspace Security" <${config.from}>`;
-
-  const sent = await deliverEmail({
-    from: fromAddress,
+  return deliverEmail(type, {
     to: toEmail,
     subject,
     html: htmlContent,
   });
-
-  if (sent) {
-    return true;
-  }
-
-  return false;
 }
 
 /**
@@ -546,24 +423,12 @@ export async function sendResetPasswordEmail(
   toEmail: string,
   resetLink: string
 ): Promise<boolean> {
-  const config = getEmailConfig();
   const subject = "🔑 Reset Your Password - Workspace Dashboard Hub";
   const htmlContent = generateResetPasswordHtml(subject, resetLink);
 
-  const fromAddress = config.from.includes("<")
-    ? config.from
-    : `"Workspace Security" <${config.from}>`;
-
-  const sent = await deliverEmail({
-    from: fromAddress,
+  return deliverEmail("password-reset", {
     to: toEmail,
     subject,
     html: htmlContent,
   });
-
-  if (sent) {
-    return true;
-  }
-
-  return false;
 }

@@ -107,6 +107,6 @@ The compiled server serves the REST API from `/api` and serves the static fronte
 | `CLIENT_ORIGIN` | Backend (`backend/.env`) | Allowed frontend origin(s) for CORS. Can be comma-separated or `*`. |
 | `JWT_SECRET` | Backend (`backend/.env`) | Secret string for signing and verifying JSON Web Tokens. |
 | `MONGODB_URI` | Backend (`backend/.env`) | Real MongoDB connection string. When unset, uses local JSON fallback. |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | Backend (`backend/.env`) | Gmail SMTP connection settings and App Password; use `smtp.gmail.com`, port `465`, and secure TLS for Gmail. Set exactly one complete credentials pair (`SMTP_*` or `EMAIL_*`). |
-| `EMAIL_FROM` | Backend (`backend/.env`) | Optional sender address authorized by the configured mail account. |
+| `RESEND_API_KEY` | Backend (`backend/.env`) | Resend API key used to submit transactional email over HTTPS. |
+| `EMAIL_FROM` | Backend (`backend/.env`) | Required sender address on a verified Resend domain, e.g. `Workspace Dashboard Hub <no-reply@example.com>`. |
 | `APP_URL` | Backend (`backend/.env`) | Frontend origin used to generate password-reset links. |

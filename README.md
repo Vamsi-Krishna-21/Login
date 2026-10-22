@@ -144,7 +144,7 @@ Routing redirects are handled automatically via `frontend/vercel.json`:
 | `JWT_SECRET` | Secret string for signing JWT tokens | `super-secret-workspace-key-1357` |
 | `CLIENT_ORIGIN` | Allowed CORS origins (comma-separated or `*`) | `*` (or frontend domain) |
 | `MONGODB_URI` | MongoDB connection string (falls back to mock DB if unset) | *(empty)* |
-| `SMTP_*` | SMTP server settings and credentials for password reset and verification email delivery | *(required for email delivery)* |
+| `RESEND_API_KEY`, `EMAIL_FROM` | Backend transactional email configuration; sender must use a verified Resend domain | *(required for email delivery)* |
 
 ---
 

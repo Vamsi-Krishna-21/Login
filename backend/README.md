@@ -15,18 +15,14 @@ PORT=5000
 JWT_SECRET=your-secure-jwt-secret
 CLIENT_ORIGIN=https://your-frontend-domain.vercel.app
 MONGODB_URI=mongodb+srv://... (optional, fallback to mock DB)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USER=your-gmail-address@gmail.com
-SMTP_PASS=your-google-app-password
-EMAIL_FROM=your-gmail-address@gmail.com
+RESEND_API_KEY=re_...
+EMAIL_FROM=Workspace Dashboard Hub <no-reply@your-verified-domain.com>
 APP_URL=https://your-frontend-domain.vercel.app
 ```
 
-For Gmail, use a Google App Password for `SMTP_PASS`, not the account password. Spaces in the App Password are removed automatically. `EMAIL_FROM` is optional and should be an address authorized to send through the configured Gmail account. The backend accepts either `EMAIL_USER` / `EMAIL_PASS` or `SMTP_USER` / `SMTP_PASS`; configure one complete pair only. If both pairs are supplied, they must match, otherwise sending is disabled and a credential-safe configuration diagnostic is logged. Port 465 uses implicit TLS by default; port 587 is used only as a connection-failure fallback and requires STARTTLS.
+`RESEND_API_KEY` and `EMAIL_FROM` are both required for email delivery. Verify the sender domain in Resend and use an address on that verified domain; a Gmail address is not automatically an authorized sender. Resend sends over HTTPS through its API. SMTP variables are no longer used by this backend.
 
-In Render, add these variables to the backend Web Service's Environment settings. Do not include quotes around values. `APP_URL` must be the deployed frontend origin so password-reset links do not point to localhost. After changing environment variables, redeploy/restart the service. Successful SMTP submission means the SMTP server accepted the message; it does not guarantee inbox placement.
+In Render, add these variables to the backend Web Service's Environment settings. Do not include quotes around values. `APP_URL` must be the deployed frontend origin so password-reset links do not point to localhost. After changing environment variables, redeploy/restart the service. A successful Resend API response means the provider accepted the request; it does not guarantee inbox placement.
 
 ## Running Standalone
 ```bash

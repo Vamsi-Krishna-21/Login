@@ -29,15 +29,14 @@ for (const envPath of candidateEnvPaths) {
 dotenv.config();
 
 export interface EmailConfig {
-  user: string;
-  pass: string;
-  host: string;
-  port: number;
-  secure: boolean;
+  apiKey: string;
   from: string;
-  service: string;
   isConfigured: boolean;
-  configurationIssue: "missing-credentials" | "conflicting-credentials" | null;
+  configurationIssue:
+    | "missing-api-key"
+    | "missing-sender"
+    | "missing-api-key-and-sender"
+    | null;
 }
 
 export function isProduction(): boolean {
@@ -86,55 +85,23 @@ export function getJwtSecret(): string {
 }
 
 /**
- * Resolves email configuration parameters supporting both EMAIL_* and SMTP_* naming.
+ * Resolves the Resend API key and verified sender configuration.
  */
 export function getEmailConfig(): EmailConfig {
-  const emailUser = (process.env.EMAIL_USER || "").trim();
-  const emailPass = (process.env.EMAIL_PASS || "").trim();
-  const smtpUser = (process.env.SMTP_USER || "").trim();
-  const smtpPass = (process.env.SMTP_PASS || "").trim();
-  const emailCredentialsPresent = Boolean(emailUser || emailPass);
-  const smtpCredentialsPresent = Boolean(smtpUser || smtpPass);
-  const emailCredentialsComplete = Boolean(emailUser && emailPass);
-  const smtpCredentialsComplete = Boolean(smtpUser && smtpPass);
-  const credentialsConflict =
-    (emailCredentialsPresent && !emailCredentialsComplete) ||
-    (smtpCredentialsPresent && !smtpCredentialsComplete) ||
-    (emailCredentialsComplete &&
-      smtpCredentialsComplete &&
-      (emailUser !== smtpUser || emailPass !== smtpPass));
-  const selectedCredentials = emailCredentialsComplete
-    ? { user: emailUser, rawPass: emailPass }
-    : { user: smtpUser, rawPass: smtpPass };
-  const service = (process.env.EMAIL_SERVICE || "gmail").trim();
-  const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
-  const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 465;
-
-  // Gmail App Passwords are 16 chars, frequently generated with spaces (e.g. "abcd efgh ijkl mnop")
-  // Strip spaces for Gmail connections so authentication does not fail.
-  const isGmail = host.toLowerCase().includes("gmail") || service.toLowerCase() === "gmail";
-  const pass = isGmail ? selectedCredentials.rawPass.replace(/\s+/g, "") : selectedCredentials.rawPass;
-
-  const secure = process.env.SMTP_SECURE !== undefined
-    ? process.env.SMTP_SECURE === "true" || process.env.SMTP_SECURE === "1"
-    : port === 465;
-
-  const from = (process.env.EMAIL_FROM || selectedCredentials.user).trim();
-  const configurationIssue = credentialsConflict
-    ? "conflicting-credentials"
-    : !selectedCredentials.user || !pass
-      ? "missing-credentials"
-      : null;
+  const apiKey = (process.env.RESEND_API_KEY || "").trim();
+  const from = (process.env.EMAIL_FROM || "").trim();
+  const configurationIssue = !apiKey && !from
+    ? "missing-api-key-and-sender"
+    : !apiKey
+      ? "missing-api-key"
+      : !from
+        ? "missing-sender"
+        : null;
   const isConfigured = configurationIssue === null;
 
   return {
-    user: selectedCredentials.user,
-    pass,
-    host,
-    port,
-    secure,
+    apiKey,
     from,
-    service,
     isConfigured,
     configurationIssue,
   };
@@ -156,13 +123,11 @@ export function validateProductionConfig(): void {
       );
     }
 
-    // 3. Check Email Configuration in production
+    // 3. Check transactional email configuration in production
     const emailConfig = getEmailConfig();
     if (!emailConfig.isConfigured) {
       console.warn(
-        emailConfig.configurationIssue === "conflicting-credentials"
-          ? "WARNING: Conflicting or incomplete email credentials are configured. Set only one complete pair: EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS."
-          : "WARNING: Email SMTP credentials (EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS) are not configured in production. Password reset and verification emails will fail."
+        `WARNING: Resend email configuration is incomplete (${emailConfig.configurationIssue}). Set RESEND_API_KEY and EMAIL_FROM in production.`
       );
     }
   }

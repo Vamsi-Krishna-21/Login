@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import nodemailer from "nodemailer";
 import { User } from "../models/User.js";
 import { getEmailConfig } from "../config/env.js";
 import {
@@ -15,25 +14,18 @@ import {
   requestPasswordChange,
 } from "../controllers/authController.js";
 
-const smtpVariables = [
+const environmentVariables = [
   "NODE_ENV",
-  "EMAIL_USER",
-  "EMAIL_PASS",
+  "RESEND_API_KEY",
   "EMAIL_FROM",
-  "EMAIL_SERVICE",
-  "SMTP_USER",
-  "SMTP_PASS",
-  "SMTP_HOST",
-  "SMTP_PORT",
-  "SMTP_SECURE",
   "JWT_SECRET",
   "APP_URL",
 ];
-let testAccountNumber = 0;
+let testKeyNumber = 0;
 
-function configureTestEnvironment(t, { credentials = true } = {}) {
+function configureTestEnvironment(t, { apiKey = true, sender = true } = {}) {
   const originalValues = Object.fromEntries(
-    smtpVariables.map((name) => [name, process.env[name]])
+    environmentVariables.map((name) => [name, process.env[name]])
   );
   t.after(() => {
     for (const [name, value] of Object.entries(originalValues)) {
@@ -42,64 +34,45 @@ function configureTestEnvironment(t, { credentials = true } = {}) {
     }
   });
 
-  for (const name of smtpVariables) delete process.env[name];
+  for (const name of environmentVariables) delete process.env[name];
   process.env.NODE_ENV = "test";
-  process.env.SMTP_HOST = "smtp.gmail.com";
-  process.env.SMTP_PORT = "465";
-  process.env.SMTP_SECURE = "true";
   process.env.JWT_SECRET = "unit-test-secret-that-is-not-used-in-production";
   process.env.APP_URL = "https://frontend.example.test";
-  if (credentials) {
-    testAccountNumber += 1;
-    process.env.SMTP_USER = `test-account-${testAccountNumber}@gmail.com`;
-    process.env.SMTP_PASS = `test-app-password-${testAccountNumber}`;
+  if (apiKey) {
+    testKeyNumber += 1;
+    process.env.RESEND_API_KEY = `re_test_api_key_${testKeyNumber}`;
+  }
+  if (sender) {
+    process.env.EMAIL_FROM = `Workspace Test <no-reply-${testKeyNumber}@verified.example.test>`;
   }
 }
 
-function stubUserMethod(t, name, implementation) {
-  const original = User[name];
-  User[name] = implementation;
-  t.after(() => { User[name] = original; });
-}
-
-function installTransportMock(t, { sendError, verifyError, onSend } = {}) {
-  const optionsSeen = [];
-  let activeSendError = sendError;
-  let verify = async () => {
-    if (verifyError) throw verifyError;
-  };
-  t.mock.method(nodemailer, "createTransport", (options) => {
-    optionsSeen.push(options);
-    return {
-      sendMail: async (mail) => {
-        onSend?.(mail);
-        const error = typeof activeSendError === "function"
-          ? activeSendError(options, mail)
-          : activeSendError;
-        if (error) throw error;
-        return { accepted: [mail.to], rejected: [] };
-      },
-      verify: (...args) => verify(...args),
-    };
+function installResendMock(t, handler) {
+  const client = getTransporter();
+  assert.ok(client);
+  const sendDescriptor = Object.getOwnPropertyDescriptor(client.emails, "send");
+  Object.defineProperty(client.emails, "send", {
+    configurable: true,
+    value: async (payload) => handler(payload),
   });
-  return {
-    optionsSeen,
-    setSendError(error) {
-      activeSendError = error;
-    },
-    setVerifyError(error) {
-      verify = async () => {
-        if (error) throw error;
-      };
-    },
-  };
+  t.after(() => {
+    if (sendDescriptor) Object.defineProperty(client.emails, "send", sendDescriptor);
+    else delete client.emails.send;
+  });
+  return client;
 }
 
 function captureLogs(t) {
   const errors = [];
   const logs = [];
-  t.mock.method(console, "error", (...values) => errors.push(values.join(" ")));
-  t.mock.method(console, "log", (...values) => logs.push(values.join(" ")));
+  const originalError = console.error;
+  const originalLog = console.log;
+  console.error = (...values) => errors.push(values.join(" "));
+  console.log = (...values) => logs.push(values.join(" "));
+  t.after(() => {
+    console.error = originalError;
+    console.log = originalLog;
+  });
   return { errors, logs };
 }
 
@@ -128,149 +101,146 @@ function fakeUser() {
   };
 }
 
-test("missing SMTP credentials are diagnosed without attempting transport creation", async (t) => {
-  configureTestEnvironment(t, { credentials: false });
-  const { errors } = captureLogs(t);
-  const transports = installTransportMock(t);
+function stubUserMethod(t, name, implementation) {
+  const original = User[name];
+  User[name] = implementation;
+  t.after(() => { User[name] = original; });
+}
 
-  assert.equal(getEmailConfig().configurationIssue, "missing-credentials");
+test("missing API key is diagnosed and no Resend client is created", async (t) => {
+  configureTestEnvironment(t, { apiKey: false });
+  const { errors } = captureLogs(t);
+
+  assert.equal(getEmailConfig().configurationIssue, "missing-api-key");
+  assert.equal(getTransporter(), null);
   assert.equal(await sendOtpEmail("recipient@example.test", "123456", "email-change"), false);
   assert.equal((await verifyEmailTransporter()).verified, false);
-  assert.equal(transports.optionsSeen.length, 0);
-  assert.match(errors.join("\n"), /missing_configuration/);
+  assert.match(errors.join("\n"), /missing-api-key/);
   assert.doesNotMatch(errors.join("\n"), /123456|recipient@example\.test/);
 });
 
-test("conflicting EMAIL_* and SMTP_* credentials fail closed", async (t) => {
-  configureTestEnvironment(t);
-  process.env.EMAIL_USER = "stale-account@gmail.com";
-  process.env.EMAIL_PASS = "stale-test-password";
+test("missing sender is diagnosed without claiming successful delivery", async (t) => {
+  configureTestEnvironment(t, { sender: false });
   const { errors } = captureLogs(t);
-  const transports = installTransportMock(t);
 
-  assert.equal(getEmailConfig().configurationIssue, "conflicting-credentials");
-  assert.equal(await sendOtpEmail("recipient@example.test", "123456", "email-change"), false);
-  assert.equal(transports.optionsSeen.length, 0);
-  assert.match(errors.join("\n"), /conflicting_credentials/);
-  assert.doesNotMatch(errors.join("\n"), /stale-account|stale-test-password|recipient@example\.test|123456/);
+  assert.equal(getEmailConfig().configurationIssue, "missing-sender");
+  assert.equal(await sendResetPasswordEmail(
+    "recipient@example.test",
+    "https://frontend.example.test/reset/private-token"
+  ), false);
+  assert.match(errors.join("\n"), /missing-sender/);
+  assert.doesNotMatch(errors.join("\n"), /recipient@example\.test|private-token/);
 });
 
-test("transporter creation uses secure Gmail settings and rebuilds after credentials change", (t) => {
+test("Resend client is recreated when the API key changes", (t) => {
   configureTestEnvironment(t);
-  const transports = installTransportMock(t);
+  const originalClient = getTransporter();
+  process.env.RESEND_API_KEY = "re_test_rotated_api_key";
 
-  assert.ok(getTransporter());
-  assert.equal(transports.optionsSeen.length, 1);
-  assert.equal(transports.optionsSeen[0].host, "smtp.gmail.com");
-  assert.equal(transports.optionsSeen[0].port, 465);
-  assert.equal(transports.optionsSeen[0].secure, true);
-  assert.equal(transports.optionsSeen[0].tls.rejectUnauthorized, true);
-
-  process.env.SMTP_PASS = "rotated-test-password";
-  assert.ok(getTransporter());
-  assert.equal(transports.optionsSeen.length, 2);
-  assert.equal(transports.optionsSeen[1].auth.pass, "rotated-test-password");
+  assert.notEqual(getTransporter(), originalClient);
 });
 
-test("successful submission uses EMAIL_FROM and logs no recipient", async (t) => {
+test("successful email submissions preserve sender, recipient, subject and template", async (t) => {
   configureTestEnvironment(t);
-  process.env.EMAIL_FROM = "verified-sender@gmail.com";
-  const logs = captureLogs(t);
-  let submittedMessage;
-  installTransportMock(t, { onSend: (mail) => { submittedMessage = mail; } });
+  const { logs } = captureLogs(t);
+  const submitted = [];
+  installResendMock(t, async (payload) => {
+    submitted.push(payload);
+    return {
+      data: { id: `email-id-${submitted.length}` },
+      error: null,
+      headers: { "x-request-id": "request-123" },
+    };
+  });
 
+  assert.equal(await sendOtpEmail("recipient@example.test", "123456", "email-change"), true);
+  assert.equal(await sendOtpEmail("recipient@example.test", "654321", "password-change"), true);
   assert.equal(
-    await sendResetPasswordEmail("recipient@example.test", "https://frontend.example.test/reset/token"),
+    await sendResetPasswordEmail(
+      "recipient@example.test",
+      "https://frontend.example.test/reset/private-token"
+    ),
     true
   );
-  assert.equal(submittedMessage.from, '"Workspace Security" <verified-sender@gmail.com>');
-  assert.match(logs.logs.join("\n"), /email\.smtp\.submission_accepted/);
-  assert.doesNotMatch(logs.logs.join("\n"), /recipient@example\.test|reset\/token/);
+  assert.equal(submitted.length, 3);
+  assert.equal(submitted[0].from, process.env.EMAIL_FROM);
+  assert.equal(submitted[0].to, "recipient@example.test");
+  assert.match(submitted[0].subject, /Verify Your New Email Address/);
+  assert.match(submitted[0].html, /123456/);
+  assert.match(submitted[1].subject, /Password Change Verification Code/);
+  assert.match(submitted[1].html, /654321/);
+  assert.match(submitted[2].subject, /Reset Your Password/);
+  assert.match(submitted[2].html, /private-token/);
+  assert.match(logs.join("\n"), /email\.resend\.accepted/);
+  assert.match(logs.join("\n"), /request-123/);
+  assert.doesNotMatch(logs.join("\n"), /recipient@example\.test|123456|654321|private-token/);
 });
 
-test("authentication failure is categorized, does not retry, and does not log secrets", async (t) => {
+test("Resend API errors return failure and log only safe status, category and request ID", async (t) => {
   configureTestEnvironment(t);
-  const logs = captureLogs(t);
-  const transportError = Object.assign(
-    new Error("Invalid login for recipient@example.test using test-app-password"),
-    { code: "EAUTH", responseCode: 535, command: "AUTH PLAIN" }
-  );
-  const transports = installTransportMock(t, { sendError: transportError });
+  const { errors } = captureLogs(t);
+  installResendMock(t, async () => ({
+    data: null,
+    error: {
+      name: "invalid_from_address",
+      statusCode: 403,
+      message: "Rejected recipient@example.test with API key re_secret",
+    },
+    headers: { "x-request-id": "request-error-456" },
+  }));
 
   assert.equal(
-    await sendResetPasswordEmail("recipient@example.test", "https://frontend.example.test/reset/private-token"),
+    await sendResetPasswordEmail(
+      "recipient@example.test",
+      "https://frontend.example.test/reset/private-token"
+    ),
     false
   );
-  assert.equal(transports.optionsSeen.length, 1);
-  const output = logs.errors.join("\n");
-  assert.match(output, /authentication_failure/);
-  assert.match(output, /535/);
-  assert.doesNotMatch(output, /recipient@example\.test|test-app-password|private-token/);
+  const output = errors.join("\n");
+  assert.match(output, /password-reset/);
+  assert.match(output, /403/);
+  assert.match(output, /authentication_or_authorization_failure/);
+  assert.match(output, /request-error-456/);
+  assert.doesNotMatch(output, /recipient@example\.test|re_secret|private-token|Rejected/);
 });
 
-test("connection failure retries on port 587 with required STARTTLS", async (t) => {
+test("thrown Resend request errors return failure without logging the exception message", async (t) => {
   configureTestEnvironment(t);
-  const logs = captureLogs(t);
-  const transports = installTransportMock(t, {
-    sendError: Object.assign(new Error("Connection timed out"), { code: "ETIMEDOUT" }),
-  });
-
-  assert.equal(await sendOtpEmail("recipient@example.test", "123456", "password-change"), false);
-  assert.equal(transports.optionsSeen.length, 2);
-  assert.equal(transports.optionsSeen[1].port, 587);
-  assert.equal(transports.optionsSeen[1].secure, false);
-  assert.equal(transports.optionsSeen[1].requireTLS, true);
-  assert.equal(transports.optionsSeen[1].tls.rejectUnauthorized, true);
-  assert.match(logs.errors.join("\n"), /connection_failure/);
-  assert.doesNotMatch(logs.errors.join("\n"), /recipient@example\.test|123456/);
-});
-
-test("port 587 fallback can accept a message after a port 465 connection failure", async (t) => {
-  configureTestEnvironment(t);
-  const logs = captureLogs(t);
-  const transports = installTransportMock(t, {
-    sendError: (options) => options.port === 465
-      ? Object.assign(new Error("Connection refused"), { code: "ECONNREFUSED" })
-      : null,
+  const { errors } = captureLogs(t);
+  installResendMock(t, async () => {
+    throw Object.assign(
+      new Error("Request for recipient@example.test used key re_secret"),
+      { name: "TypeError" }
+    );
   });
 
   assert.equal(
-    await sendResetPasswordEmail("recipient@example.test", "https://frontend.example.test/reset/token"),
-    true
+    await sendOtpEmail("recipient@example.test", "987654", "password-change"),
+    false
   );
-  assert.deepEqual(transports.optionsSeen.map((options) => options.port), [465, 587]);
-  assert.match(logs.logs.join("\n"), /"port":587/);
-  assert.doesNotMatch(logs.logs.join("\n"), /recipient@example\.test|reset\/token/);
+  const output = errors.join("\n");
+  assert.match(output, /password-change/);
+  assert.match(output, /network_or_sdk_error/);
+  assert.doesNotMatch(output, /recipient@example\.test|987654|re_secret|Request for/);
 });
 
-test("TLS failures are diagnosed without logging the raw server message", async (t) => {
+test("all email-triggering controller flows retain success and generic failure behavior", async (t) => {
   configureTestEnvironment(t);
-  const logs = captureLogs(t);
-  const tlsError = Object.assign(
-    new Error("TLS certificate failed for recipient@example.test"),
-    { code: "ESOCKET", command: "CONN" }
-  );
-  const transports = installTransportMock(t, { verifyError: tlsError });
-
-  assert.equal((await verifyEmailTransporter()).verified, false);
-  assert.equal(transports.optionsSeen.length, 1);
-  const output = logs.errors.join("\n");
-  assert.match(output, /tls_failure/);
-  assert.doesNotMatch(output, /certificate failed|recipient@example\.test/);
-});
-
-test("all three email-triggering controller flows return success or generic failure", async (t) => {
-  configureTestEnvironment(t);
-  const logs = captureLogs(t);
+  const { errors } = captureLogs(t);
   let shouldFailDelivery = false;
   let activeFlow = "";
-  const transports = installTransportMock(t, {
-    onSend: () => {
-      if (shouldFailDelivery) {
-        throw Object.assign(new Error("SMTP temporary failure"), { code: "ECONNECTION" });
+  installResendMock(t, async () => shouldFailDelivery
+    ? {
+        data: null,
+        error: {
+          name: "application_error",
+          statusCode: 503,
+          message: "Provider internal detail",
+        },
+        headers: null,
       }
-    },
-  });
+    : { data: { id: "accepted-email-id" }, error: null, headers: null });
+
   const user = fakeUser();
   stubUserMethod(t, "findById", async () => user);
   stubUserMethod(t, "findOne", async () => activeFlow === "forgot" ? user : null);
@@ -306,12 +276,13 @@ test("all three email-triggering controller flows return success or generic fail
         `${flow.name} failure=${failDelivery}: ${JSON.stringify(response.body)}`
       );
       if (failDelivery) {
-        assert.doesNotMatch(JSON.stringify(response.body), /SMTP temporary failure|ECONNECTION/);
+        assert.doesNotMatch(JSON.stringify(response.body), /Provider internal detail|application_error/);
       }
     }
   }
 
-  assert.equal(transports.optionsSeen.length, 4);
-  assert.equal(transports.optionsSeen.filter((options) => options.port === 587).length, 3);
-  assert.doesNotMatch(logs.errors.join("\n"), /recipient@example\.test|new-address@example\.test|NewPassword|123456/);
+  assert.doesNotMatch(
+    errors.join("\n"),
+    /recipient@example\.test|new-address@example\.test|NewPassword|123456|Provider internal detail/
+  );
 });
