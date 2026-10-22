@@ -112,7 +112,8 @@ The frontend is fully configured for standalone deployment to **Vercel**:
    - **Build Command**: `npm run build`
    - **Output Directory**: `dist`
 4. Set Environment Variables:
-   - `VITE_API_URL`: The URL of your deployed backend (e.g. `https://your-backend-api.onrender.com`).
+   - `VITE_API_URL`: Required for separate deployments; set it to your deployed backend origin (e.g. `https://your-backend-api.onrender.com`).
+   - Vercel's rewrite serves the SPA and does not proxy `/api` requests. Vite embeds this variable at build time, so redeploy after changing it.
 5. Click **"Deploy"**.
 
 Routing redirects are handled automatically via `frontend/vercel.json`:
@@ -134,7 +135,7 @@ Routing redirects are handled automatically via `frontend/vercel.json`:
 ### Frontend (`frontend/.env`)
 | Variable | Description | Default |
 |---|---|---|
-| `VITE_API_URL` | Base URL of the backend API. When empty, requests are relative (useful with proxies). | `http://localhost:5000` or empty |
+| `VITE_API_URL` | Backend origin. Required for separate frontend/backend deployments; leave empty only when an API proxy is configured for the same origin. | `http://localhost:5000` in development |
 
 ### Backend (`backend/.env`)
 | Variable | Description | Default |
@@ -143,7 +144,7 @@ Routing redirects are handled automatically via `frontend/vercel.json`:
 | `JWT_SECRET` | Secret string for signing JWT tokens | `super-secret-workspace-key-1357` |
 | `CLIENT_ORIGIN` | Allowed CORS origins (comma-separated or `*`) | `*` (or frontend domain) |
 | `MONGODB_URI` | MongoDB connection string (falls back to mock DB if unset) | *(empty)* |
-| `SMTP_*` | Optional SMTP mail server configuration | *(empty, uses console mock)* |
+| `SMTP_*` | SMTP server settings and credentials for password reset and verification email delivery | *(required for email delivery)* |
 
 ---
 

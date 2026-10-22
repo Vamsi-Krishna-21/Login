@@ -13,8 +13,11 @@ async function startBackendServer() {
   await connectAndSeed();
 
   // Non-blocking check of email transporter on startup
-  verifyEmailTransporter().catch((err: any) => {
-    console.warn("[SMTP STARTUP] Initial transporter verification warning:", err.message);
+  verifyEmailTransporter().catch(() => {
+    console.error(JSON.stringify({
+      event: "email.smtp.startup_check.failure",
+      message: "Unexpected error while verifying SMTP configuration.",
+    }));
   });
 
   app.listen(PORT, "0.0.0.0", () => {

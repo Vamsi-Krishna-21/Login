@@ -5,7 +5,7 @@ React 19 + Vite + Tailwind CSS single page web application for Workspace Dashboa
 ## Features
 - **Modern UI**: Tailwind CSS v4, Lucide React icons, dark/light theme switching.
 - **Client-Side Routing**: React Router v7 with protected routes.
-- **REST Integration**: Preconfigured Axios & Fetch utilities that automatically connect to your backend via `VITE_API_URL` or relative proxying.
+- **REST Integration**: Preconfigured Axios & Fetch utilities that connect to your backend via `VITE_API_URL` (or the local Vite development proxy).
 - **Zero-config SPA Redirects**: Pre-packaged `vercel.json` and `netlify.toml` for seamless client-side page reloads.
 
 ## Environment Variables
@@ -38,8 +38,8 @@ npm run preview
 2. Set **Root Directory** to `frontend`.
 3. Framework Preset: **Vite**.
 4. In **Environment Variables**, add:
-   - `VITE_API_URL`: Your backend URL (e.g. `https://workspace-api.onrender.com`).
-5. Click **Deploy**. Vercel uses `vercel.json` to handle all routing seamlessly.
+   - `VITE_API_URL`: Your backend origin (for this deployment, `https://login-hkdx.onrender.com`).
+5. Click **Deploy**. Vercel's `vercel.json` rewrite handles SPA routes only; it does not proxy API requests. Redeploy after changing `VITE_API_URL`.
 
 ### Netlify
 1. Connect your repository on Netlify.

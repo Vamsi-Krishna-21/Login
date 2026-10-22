@@ -15,7 +15,7 @@ const clientOrigin = process.env.CLIENT_ORIGIN || process.env.FRONTEND_URL;
 app.use(
   cors({
     origin: clientOrigin
-      ? clientOrigin.includes(",")
+      ? clientOrigin.includes(",")  
         ? clientOrigin.split(",").map((o) => o.trim())
         : clientOrigin
       : true, // Allow any origin if not explicitly restricted (essential for easy deployment)

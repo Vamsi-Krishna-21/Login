@@ -74,7 +74,8 @@ The project is structured with dedicated `frontend/` and `backend/` folders so y
    - Set **Build Command**: `npm run build`.
    - Set **Output Directory**: `dist`.
 2. Add **Environment Variables**:
-   - `VITE_API_URL`: Your deployed backend URL (e.g. `https://your-backend-api.onrender.com`).
+   - `VITE_API_URL`: Required for separate deployments; set it to the backend origin (for this deployment, `https://login-hkdx.onrender.com`).
+   - Vercel's rewrite serves the SPA and does not proxy `/api` requests. Vite embeds this variable at build time, so redeploy after changing it.
 3. Deploy!
    - Single-page application routing is already preconfigured via `frontend/vercel.json` and `frontend/netlify.toml`, so deep links like `/dashboard` work seamlessly without 404 errors.
 
@@ -102,8 +103,10 @@ The compiled server serves the REST API from `/api` and serves the static fronte
 
 | Variable | Location | Description |
 |---|---|---|
-| `VITE_API_URL` | Frontend (`frontend/.env`) | URL of the backend API. Set to empty for monorepo/unified dev. |
+| `VITE_API_URL` | Frontend (`frontend/.env`) | Backend origin. Required for separate deployments; leave empty only when a same-origin API proxy is configured. |
 | `CLIENT_ORIGIN` | Backend (`backend/.env`) | Allowed frontend origin(s) for CORS. Can be comma-separated or `*`. |
 | `JWT_SECRET` | Backend (`backend/.env`) | Secret string for signing and verifying JSON Web Tokens. |
 | `MONGODB_URI` | Backend (`backend/.env`) | Real MongoDB connection string. When unset, uses local JSON fallback. |
-| `SMTP_*` | Backend (`backend/.env`) | Optional SMTP credentials for production password reset emails. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` | Backend (`backend/.env`) | Gmail SMTP connection settings and App Password; use `smtp.gmail.com`, port `465`, and secure TLS for Gmail. Set exactly one complete credentials pair (`SMTP_*` or `EMAIL_*`). |
+| `EMAIL_FROM` | Backend (`backend/.env`) | Optional sender address authorized by the configured mail account. |
+| `APP_URL` | Backend (`backend/.env`) | Frontend origin used to generate password-reset links. |

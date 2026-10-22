@@ -37,7 +37,7 @@ export interface EmailConfig {
   from: string;
   service: string;
   isConfigured: boolean;
-  allowConsoleOtp: boolean;
+  configurationIssue: "missing-credentials" | "conflicting-credentials" | null;
 }
 
 export function isProduction(): boolean {
@@ -89,8 +89,23 @@ export function getJwtSecret(): string {
  * Resolves email configuration parameters supporting both EMAIL_* and SMTP_* naming.
  */
 export function getEmailConfig(): EmailConfig {
-  const user = (process.env.EMAIL_USER || process.env.SMTP_USER || "").trim();
-  const rawPass = (process.env.EMAIL_PASS || process.env.SMTP_PASS || "").trim();
+  const emailUser = (process.env.EMAIL_USER || "").trim();
+  const emailPass = (process.env.EMAIL_PASS || "").trim();
+  const smtpUser = (process.env.SMTP_USER || "").trim();
+  const smtpPass = (process.env.SMTP_PASS || "").trim();
+  const emailCredentialsPresent = Boolean(emailUser || emailPass);
+  const smtpCredentialsPresent = Boolean(smtpUser || smtpPass);
+  const emailCredentialsComplete = Boolean(emailUser && emailPass);
+  const smtpCredentialsComplete = Boolean(smtpUser && smtpPass);
+  const credentialsConflict =
+    (emailCredentialsPresent && !emailCredentialsComplete) ||
+    (smtpCredentialsPresent && !smtpCredentialsComplete) ||
+    (emailCredentialsComplete &&
+      smtpCredentialsComplete &&
+      (emailUser !== smtpUser || emailPass !== smtpPass));
+  const selectedCredentials = emailCredentialsComplete
+    ? { user: emailUser, rawPass: emailPass }
+    : { user: smtpUser, rawPass: smtpPass };
   const service = (process.env.EMAIL_SERVICE || "gmail").trim();
   const host = (process.env.SMTP_HOST || "smtp.gmail.com").trim();
   const port = process.env.SMTP_PORT ? parseInt(process.env.SMTP_PORT, 10) : 465;
@@ -98,24 +113,22 @@ export function getEmailConfig(): EmailConfig {
   // Gmail App Passwords are 16 chars, frequently generated with spaces (e.g. "abcd efgh ijkl mnop")
   // Strip spaces for Gmail connections so authentication does not fail.
   const isGmail = host.toLowerCase().includes("gmail") || service.toLowerCase() === "gmail";
-  const pass = isGmail ? rawPass.replace(/\s+/g, "") : rawPass;
+  const pass = isGmail ? selectedCredentials.rawPass.replace(/\s+/g, "") : selectedCredentials.rawPass;
 
   const secure = process.env.SMTP_SECURE !== undefined
     ? process.env.SMTP_SECURE === "true" || process.env.SMTP_SECURE === "1"
     : port === 465;
 
-  const from = (process.env.EMAIL_FROM || user).trim();
-  const isConfigured = Boolean(user && pass);
-
-  // In production, console OTP logging is strictly disallowed.
-  // In development, it must be explicitly enabled via ENABLE_CONSOLE_OTP or ALLOW_CONSOLE_OTP.
-  const allowConsoleOtp = !isProduction() && (
-    process.env.ENABLE_CONSOLE_OTP === "true" ||
-    process.env.ALLOW_CONSOLE_OTP === "true"
-  );
+  const from = (process.env.EMAIL_FROM || selectedCredentials.user).trim();
+  const configurationIssue = credentialsConflict
+    ? "conflicting-credentials"
+    : !selectedCredentials.user || !pass
+      ? "missing-credentials"
+      : null;
+  const isConfigured = configurationIssue === null;
 
   return {
-    user,
+    user: selectedCredentials.user,
     pass,
     host,
     port,
@@ -123,7 +136,7 @@ export function getEmailConfig(): EmailConfig {
     from,
     service,
     isConfigured,
-    allowConsoleOtp,
+    configurationIssue,
   };
 }
 
@@ -147,7 +160,9 @@ export function validateProductionConfig(): void {
     const emailConfig = getEmailConfig();
     if (!emailConfig.isConfigured) {
       console.warn(
-        "WARNING: Email SMTP credentials (EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS) are not configured in production. Password reset and verification emails will fail."
+        emailConfig.configurationIssue === "conflicting-credentials"
+          ? "WARNING: Conflicting or incomplete email credentials are configured. Set only one complete pair: EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS."
+          : "WARNING: Email SMTP credentials (EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS) are not configured in production. Password reset and verification emails will fail."
       );
     }
   }

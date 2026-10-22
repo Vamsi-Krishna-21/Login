@@ -1,7 +1,146 @@
 import nodemailer from "nodemailer";
-import { getEmailConfig, isProduction } from "../config/env.js";
+import { getEmailConfig } from "../config/env.js";
 
 let cachedTransporter: nodemailer.Transporter | null = null;
+let cachedTransporterConfig: {
+  user: string;
+  pass: string;
+  host: string;
+  port: number;
+  secure: boolean;
+} | null = null;
+
+type SmtpFailureCategory =
+  | "authentication_failure"
+  | "connection_failure"
+  | "tls_failure"
+  | "server_rejection"
+  | "other";
+
+function getSmtpErrorDetails(error: unknown): {
+  category: SmtpFailureCategory;
+  code?: string;
+  responseCode?: number;
+  command?: string;
+  message: string;
+} {
+  const smtpError = error && typeof error === "object"
+    ? error as {
+        code?: unknown;
+        responseCode?: unknown;
+        command?: unknown;
+        message?: unknown;
+      }
+    : {};
+  const code = typeof smtpError.code === "string" && /^[A-Z0-9_-]{1,40}$/i.test(smtpError.code)
+    ? smtpError.code
+    : undefined;
+  const responseCode = typeof smtpError.responseCode === "number" &&
+    Number.isInteger(smtpError.responseCode)
+    ? smtpError.responseCode
+    : undefined;
+  const command = typeof smtpError.command === "string" &&
+    /^[A-Z ]{1,30}$/i.test(smtpError.command)
+    ? smtpError.command.toUpperCase()
+    : undefined;
+  const errorMessage = typeof smtpError.message === "string" ? smtpError.message : "";
+
+  if (responseCode === 535 || responseCode === 534 || code === "EAUTH") {
+    return {
+      category: "authentication_failure",
+      code,
+      responseCode,
+      command,
+      message: "SMTP authentication was rejected.",
+    };
+  }
+  if (
+    /tls|ssl|certificate|handshake|self[- ]signed/i.test(errorMessage) ||
+    code === "ERR_TLS_CERT_ALTNAME_INVALID" ||
+    code === "ETLS"
+  ) {
+    return {
+      category: "tls_failure",
+      code,
+      responseCode,
+      command,
+      message: "SMTP TLS negotiation or certificate validation failed.",
+    };
+  }
+  if (
+    ["ECONNECTION", "ECONNREFUSED", "ETIMEDOUT", "ESOCKET", "EHOSTUNREACH", "ENETUNREACH"]
+      .includes(code || "")
+  ) {
+    return {
+      category: "connection_failure",
+      code,
+      responseCode,
+      command,
+      message: "Could not establish or maintain the SMTP connection.",
+    };
+  }
+  if (responseCode !== undefined && responseCode >= 400) {
+    return {
+      category: "server_rejection",
+      code,
+      responseCode,
+      command,
+      message: "The SMTP server rejected the message or command.",
+    };
+  }
+
+  return {
+    category: "other",
+    code,
+    responseCode,
+    command,
+    message: "The SMTP operation failed.",
+  };
+}
+
+function logSmtpFailure(operation: "verify" | "send", port: number, error: unknown): void {
+  const details = getSmtpErrorDetails(error);
+  console.error(JSON.stringify({
+    event: "email.smtp.failure",
+    operation,
+    category: details.category,
+    port,
+    ...(details.code ? { code: details.code } : {}),
+    ...(details.responseCode ? { responseCode: details.responseCode } : {}),
+    ...(details.command ? { command: details.command } : {}),
+    message: details.message,
+  }));
+}
+
+function createTransporter(
+  config: ReturnType<typeof getEmailConfig>,
+  port = config.port
+): nodemailer.Transporter {
+  return nodemailer.createTransport({
+    host: config.host,
+    port,
+    secure: port === config.port ? config.secure : port === 465,
+    ...(port === 587 ? { requireTLS: true } : {}),
+    auth: {
+      user: config.user,
+      pass: config.pass,
+    },
+    tls: {
+      rejectUnauthorized: true,
+    },
+  });
+}
+
+function hasSameTransporterConfig(config: ReturnType<typeof getEmailConfig>): boolean {
+  return Boolean(
+    cachedTransporterConfig &&
+    cachedTransporterConfig.user === config.user &&
+    cachedTransporterConfig.pass === config.pass &&
+    cachedTransporterConfig.host === config.host &&
+    cachedTransporterConfig.port === config.port &&
+    cachedTransporterConfig.secure === config.secure
+  );
+}
 
 /**
  * Returns a reusable Nodemailer transporter instance.
@@ -9,25 +148,23 @@ let cachedTransporter: nodemailer.Transporter | null = null;
 export function getTransporter(): nodemailer.Transporter | null {
   const config = getEmailConfig();
   if (!config.isConfigured) {
+    cachedTransporter = null;
+    cachedTransporterConfig = null;
     return null;
   }
 
-  if (!cachedTransporter) {
+  if (!cachedTransporter || !hasSameTransporterConfig(config)) {
     try {
-      cachedTransporter = nodemailer.createTransport({
+      cachedTransporter = createTransporter(config);
+      cachedTransporterConfig = {
+        user: config.user,
+        pass: config.pass,
         host: config.host,
         port: config.port,
-        secure: config.secure, // true for 465 (SSL/TLS)
-        auth: {
-          user: config.user,
-          pass: config.pass,
-        },
-        tls: {
-          rejectUnauthorized: isProduction(),
-        },
-      });
-    } catch (error: any) {
-      console.error("Failed to initialize Nodemailer transporter:", error.message);
+        secure: config.secure,
+      };
+    } catch (error) {
+      logSmtpFailure("verify", config.port, error);
       return null;
     }
   }
@@ -42,114 +179,89 @@ export async function verifyEmailTransporter(): Promise<{ verified: boolean; mes
   const config = getEmailConfig();
 
   if (!config.isConfigured) {
-    const msg = "Email service is not configured (EMAIL_USER / EMAIL_PASS or SMTP_USER / SMTP_PASS missing).";
-    console.log(`[SMTP NOTICE] ${msg}`);
-    return { verified: false, message: msg };
+    const category = config.configurationIssue === "conflicting-credentials"
+      ? "conflicting_credentials"
+      : "missing_configuration";
+    console.error(JSON.stringify({ event: "email.smtp.configuration_failure", category }));
+    return {
+      verified: false,
+      message: "Email service credentials are missing, incomplete, or conflicting.",
+    };
   }
 
   const primaryTransporter = getTransporter();
   if (!primaryTransporter) {
-    return { verified: false, message: "Transporter could not be created from current configuration." };
+    return { verified: false, message: "SMTP transporter could not be created." };
   }
 
   try {
     await primaryTransporter.verify();
-    console.log(`[SMTP SUCCESS] Verified connection to ${config.host}:${config.port} as ${config.user}`);
+    console.log(JSON.stringify({
+      event: "email.smtp.verified",
+      port: config.port,
+    }));
     return { verified: true, message: "SMTP configuration verified successfully." };
-  } catch (error: any) {
-    // If port 465 encounters connection drop/timeout (common with residential ISPs), test port 587 STARTTLS
-    if (
-      config.port === 465 &&
-      (error.message?.includes("Connection closed") ||
-        error.code === "ECONNREFUSED" ||
-        error.code === "ETIMEDOUT")
-    ) {
+  } catch (error) {
+    logSmtpFailure("verify", config.port, error);
+    if (config.port === 465 && getSmtpErrorDetails(error).category === "connection_failure") {
       try {
-        console.log("[SMTP NOTICE] Port 465 connection dropped by network/ISP. Testing port 587 (STARTTLS)...");
-        const fallbackTransporter = nodemailer.createTransport({
-          host: config.host,
-          port: 587,
-          secure: false,
-          auth: {
-            user: config.user,
-            pass: config.pass,
-          },
-          tls: {
-            rejectUnauthorized: isProduction(),
-          },
-        });
+        const fallbackTransporter = createTransporter(config, 587);
         await fallbackTransporter.verify();
-        console.log(`[SMTP SUCCESS] Verified connection on port 587 as ${config.user}`);
+        console.log(JSON.stringify({ event: "email.smtp.verified", port: 587 }));
         return {
           verified: true,
-          message: "SMTP verified via port 587 (port 465 dropped by network/ISP).",
+          message: "SMTP configuration verified using port 587.",
         };
-      } catch (retryErr: any) {
-        // proceed with original error handling
+      } catch (retryError) {
+        logSmtpFailure("verify", 587, retryError);
       }
     }
 
-    let friendly = error.message || "Unknown SMTP error";
-    if (
-      error.responseCode === 535 ||
-      error.message?.includes("BadCredentials") ||
-      error.message?.includes("Invalid second-factor")
-    ) {
-      friendly =
-        "Gmail SMTP Authentication Failed (535): Invalid App Password. Ensure you use a 16-character Google App Password (not your normal Gmail account password) with 2-Step Verification enabled.";
-    } else if (error.code === "ECONNREFUSED" || error.code === "ETIMEDOUT") {
-      friendly = `SMTP Connection Failed (${error.code}) to ${config.host}:${config.port}. Check network or firewall access.`;
-    }
-
-    console.error(`[SMTP ERROR] Verification failed: ${friendly}`);
-    return { verified: false, message: friendly };
+    return { verified: false, message: "SMTP verification failed. See server diagnostics." };
   }
 }
 
 /**
- * Delivers an email message with intelligent port fallback if local ISP drops port 465.
+ * Delivers an email message with port 587 fallback for connection failures on port 465.
  */
 async function deliverEmail(mailOptions: nodemailer.SendMailOptions): Promise<boolean> {
   const config = getEmailConfig();
   const primaryTransporter = getTransporter();
 
-  if (!primaryTransporter || !config.isConfigured) {
+  if (!config.isConfigured) {
+    console.error(JSON.stringify({
+      event: "email.smtp.configuration_failure",
+      category: config.configurationIssue === "conflicting-credentials"
+        ? "conflicting_credentials"
+        : "missing_configuration",
+    }));
+    return false;
+  }
+  if (!primaryTransporter) {
     return false;
   }
 
   try {
     await primaryTransporter.sendMail(mailOptions);
-    console.log(`[SMTP SUCCESS] Email delivered successfully to ${mailOptions.to}`);
+    console.log(JSON.stringify({
+      event: "email.smtp.submission_accepted",
+      port: config.port,
+    }));
     return true;
-  } catch (error: any) {
-    console.error(`[SMTP ERROR] Delivery attempt on port ${config.port} failed: ${error.message}`);
+  } catch (error) {
+    logSmtpFailure("send", config.port, error);
 
-    // If port 465 is blocked or dropped by local ISP, retry once via port 587 (STARTTLS)
-    if (
-      config.port === 465 &&
-      (error.message?.includes("Connection closed") ||
-        error.code === "ECONNREFUSED" ||
-        error.code === "ETIMEDOUT")
-    ) {
+    if (config.port === 465 && getSmtpErrorDetails(error).category === "connection_failure") {
       try {
-        console.log("[SMTP RETRY] Retrying delivery via port 587 (STARTTLS)...");
-        const fallbackTransporter = nodemailer.createTransport({
-          host: config.host,
-          port: 587,
-          secure: false,
-          auth: {
-            user: config.user,
-            pass: config.pass,
-          },
-          tls: {
-            rejectUnauthorized: isProduction(),
-          },
-        });
+        const fallbackTransporter = createTransporter(config, 587);
         await fallbackTransporter.sendMail(mailOptions);
-        console.log(`[SMTP SUCCESS] Fallback delivery on port 587 succeeded to ${mailOptions.to}`);
+        console.log(JSON.stringify({
+          event: "email.smtp.submission_accepted",
+          port: 587,
+        }));
         return true;
-      } catch (retryError: any) {
-        console.error(`[SMTP ERROR] Fallback attempt on port 587 also failed: ${retryError.message}`);
+      } catch (retryError) {
+        logSmtpFailure("send", 587, retryError);
       }
     }
 
@@ -411,7 +523,7 @@ export async function sendOtpEmail(
 
   const fromAddress = config.from.includes("<")
     ? config.from
-    : `"Workspace Security" <${config.user}>`;
+    : `"Workspace Security" <${config.from}>`;
 
   const sent = await deliverEmail({
     from: fromAddress,
@@ -424,20 +536,6 @@ export async function sendOtpEmail(
     return true;
   }
 
-  // Explicit development console logging only when allowed
-  if (config.allowConsoleOtp) {
-    console.log(`\n==================================================`);
-    console.log(`[LOCAL DEV CONSOLE OTP - ENABLE_CONSOLE_OTP=true]`);
-    console.log(`To: ${toEmail}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Code: ${otp}`);
-    console.log(`==================================================\n`);
-    return true;
-  }
-
-  console.error(
-    `[EMAIL DELIVERY FAILED] Could not deliver verification code to ${toEmail}. SMTP not configured or delivery failed.`
-  );
   return false;
 }
 
@@ -454,7 +552,7 @@ export async function sendResetPasswordEmail(
 
   const fromAddress = config.from.includes("<")
     ? config.from
-    : `"Workspace Security" <${config.user}>`;
+    : `"Workspace Security" <${config.from}>`;
 
   const sent = await deliverEmail({
     from: fromAddress,
@@ -467,19 +565,5 @@ export async function sendResetPasswordEmail(
     return true;
   }
 
-  // Explicit development console logging only when allowed
-  if (config.allowConsoleOtp) {
-    console.log(`\n==================================================`);
-    console.log(`[LOCAL DEV RESET LINK - ENABLE_CONSOLE_OTP=true]`);
-    console.log(`To: ${toEmail}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Link: ${resetLink}`);
-    console.log(`==================================================\n`);
-    return true;
-  }
-
-  console.error(
-    `[EMAIL DELIVERY FAILED] Could not deliver password reset email to ${toEmail}. SMTP not configured or delivery failed.`
-  );
   return false;
 }
