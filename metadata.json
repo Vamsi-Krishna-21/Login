@@ -1,0 +1,6 @@
+{
+  "name": "Workspace Dashboard Hub",
+  "description": "A full-stack, responsive project and task workspace featuring JWT authentication, CRUD operations, advanced search, filtering, and pagination.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
